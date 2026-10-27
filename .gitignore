@@ -27,3 +27,6 @@ __pycache__/
 # Local databases
 *.db
 *.sqlite3
+.ipynb_checkpoints/
+*.sqlite
+*.sqlite3
