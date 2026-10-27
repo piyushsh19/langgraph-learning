@@ -301,6 +301,56 @@ The workflow demonstrates an **evaluator-optimizer pattern**: one LLM generates 
 
 **Key takeaway:** `MemorySaver` enables conversation continuity across graph invocations during the current process. Different thread IDs maintain separate conversations. For persistence across application restarts, a durable checkpointer is required.
 
+### 10. Persistence and Threads (`10_persistence.ipynb`)
+
+**Objective:** Understand how LangGraph checkpointing saves workflow state and how `thread_id` separates checkpoint histories.
+
+**Concepts covered:**
+- Defining shared state with `TypedDict`.
+- Building a sequential graph with `StateGraph`, nodes, edges, `START`, and `END`.
+- Saving graph checkpoints with `InMemorySaver`.
+- Passing `thread_id` through the `configurable` runtime configuration.
+- Inspecting saved state with `workflow.get_state(config)`.
+- Comparing repeated invocations in the same thread with invocations in separate threads.
+
+**Workflow architecture:**
+
+```text
+              START
+                |
+                v
+         generate_joke
+                |
+                v
+      generate_explanation
+                |
+                v
+               END
+```
+
+**How it works:**
+
+1. The input state supplies a topic.
+2. `generate_joke` calls the LLM and stores the generated joke in state.
+3. `generate_explanation` reads the joke, asks the LLM to explain it, and stores the explanation.
+4. The compiled graph uses `InMemorySaver` to checkpoint state during execution.
+5. A `thread_id` identifies the checkpoint history used for an invocation.
+6. `workflow.get_state(config)` retrieves the latest saved state for that thread.
+
+**Thread configuration:**
+
+```python
+config = {"configurable": {"thread_id": "1"}}
+result = workflow.invoke({"topic": "pizza"}, config=config)
+```
+
+Use the same `thread_id` to access the same thread's checkpoint history. Use a different ID, such as `"2"`, to keep another thread separate.
+
+**Important distinction:** Checkpointing saves state between graph invocations, but it does not automatically make a completed workflow continue from its final node. A normal `invoke()` runs the graph from its start using the supplied input and the selected thread's saved state. `InMemorySaver` is process-local and does not survive a Python process restart; durable applications should use a persistent checkpointer.
+
+**Key takeaway:** LangGraph persistence is built around checkpoints and thread identities. A checkpointer stores state, while `thread_id` tells LangGraph which workflow history to access.
+
+
 
 ## 🛠️ Tech Stack
 
