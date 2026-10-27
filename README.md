@@ -264,6 +264,44 @@ class TweetState(TypedDict):
 
 The workflow demonstrates an **evaluator-optimizer pattern**: one LLM generates content, another evaluates it, and the optimizer uses feedback to improve the next version. A maximum iteration limit is important to prevent an endless loop if the evaluator never approves a tweet.
 
+
+### 9. Basic Chatbot with LangGraph Memory (`9_basic_chatbot.ipynb`)
+
+**Objective:** Build a conversational chatbot using LangGraph, LangChain, and OpenAI, with conversation history maintained through checkpointing.
+
+**Concepts covered:**
+- Defining message-based state using `TypedDict` and `Annotated`.
+- Using `add_messages` to maintain conversation history.
+- Creating a chatbot node with `ChatOpenAI`.
+- Building a `StateGraph` with `START`, a chatbot node, and `END`.
+- Compiling the graph with `MemorySaver`.
+- Using `thread_id` to maintain separate conversation histories.
+- Implementing an interactive chatbot loop with exit commands.
+
+**Workflow architecture:**
+
+```text
+       START
+         |
+         v
+     chat_node
+         |
+         v
+        END
+```
+
+**How it works:**
+
+1. The user submits a message to the chatbot.
+2. LangGraph loads the existing checkpoint for the specified `thread_id`.
+3. The `chat_node` sends the conversation history to the LLM.
+4. The LLM generates a response, which is added to the message history.
+5. LangGraph saves the updated state using `MemorySaver`.
+6. Subsequent calls with the same `thread_id` continue the conversation.
+
+**Key takeaway:** `MemorySaver` enables conversation continuity across graph invocations during the current process. Different thread IDs maintain separate conversations. For persistence across application restarts, a durable checkpointer is required.
+
+
 ## 🛠️ Tech Stack
 
 -   **Python** --- Programming language
