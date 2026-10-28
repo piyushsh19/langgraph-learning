@@ -11,6 +11,7 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 
 # Local Hugging Face model
+load_dotenv()
 
 
 model_id = "Qwen/Qwen2.5-3B-Instruct"
