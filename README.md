@@ -446,7 +446,7 @@ Key takeaway
 A compiled LangGraph subgraph can be called from a node in a parent graph. The child graph encapsulates one responsibility—translation—while the parent coordinates the overall process and maps data between the two state schemas.
 
 Shared-State Subgraphs: Draft Review and Improvement
-Example: 16_shared_state_subgraph.py
+Example: ### 12.shared_state_subgraph.py
 Local model: Qwen/Qwen2.5-3B-Instruct
 
 This workflow demonstrates a LangGraph parent graph that calls a compiled improvement subgraph. Both graphs use the same SharedState schema, so the child graph can read fields created by the parent and write additional fields that become available to later parent nodes.
@@ -539,6 +539,147 @@ Important concepts
 - Run metadata: The config passed to graph.invoke supplies a run name, tags, and model metadata for tracing or observability integrations; it does not change the graph's state schema.
 Key takeaway
 A subgraph can use the same state schema as its parent graph. This lets the subgraph work with fields already produced upstream and return new state updates for downstream parent nodes, while keeping the review-and-revision logic encapsulated in a reusable component.
+
+
+## 13.Message State, Checkpointing, and Threads with a Local LLM
+Example file: 13_shortTermMemory.py
+Model: Qwen/Qwen2.5-3B-Instruct, loaded from the local Hugging Face cache.
+
+This example demonstrates how a LangGraph checkpointer preserves message history between graph invocations. The same thread_id identifies each turn as part of the same conversation. This implementation uses a local Hugging Face model, not the OpenAI API.
+Architecture
+START
+  |
+  v
+[call_model]
+  | Reads the accumulated messages
+  | Invokes the local Qwen model
+  | Returns the assistant response
+  v
+ END
+Core concepts
+- MessagesState: LangGraph's built-in state schema for a conversation's messages list.
+- Message reducer: New messages are appended to the conversation history rather than replacing the entire list.
+- InMemorySaver: Saves checkpoints in memory while the Python process is running.
+- thread_id: Identifies a conversation. Reusing an ID continues that thread; a different ID isolates another conversation.
+- graph.get_state(config): Can be used to inspect the saved state for a particular thread.
+How a thread continues
+config = {"configurable": {"thread_id": "thread-1"}}
+
+graph.invoke(
+    {"messages": [HumanMessage(content="Hi, my name is Piyush.")]},
+    config=config,
+)
+
+graph.invoke(
+    {"messages": [HumanMessage(content="What is my name?")]},
+    config=config,
+)
+Both calls use the same thread ID. The second call receives the earlier conversation history along with the new question, allowing the model to use the name mentioned in the first turn.
+Components
+Component	Responsibility
+MessagesState	Holds the conversation's messages
+call_model	Sends conversation history to the local model
+InMemorySaver	Stores checkpoints in process memory
+thread_id	Selects which conversation history to resume
+graph.get_state(config)	Inspects a thread's saved state
+
+
+LangGraph PostgreSQL Checkpointing with a Local LLM
+Python file: 14_shortTermMemory_Postgres.py
+Model: Qwen/Qwen2.5-3B-Instruct, loaded from the local Hugging Face cache
+Checkpoint storage: PostgreSQL via PostgresSaver
+
+This example upgrades the in-memory checkpointing example to durable PostgreSQL-backed checkpointing. The graph uses a local Hugging Face model and does not call ChatOpenAI or require an OpenAI API key.
+Workflow
+User message
+    |
+    v
+[LangGraph MessagesState]
+    |
+    v
+[call_model: local Qwen model]
+    |
+    v
+Assistant response
+
+### 14.PostgresSaver stores checkpointed graph state in PostgreSQL,
+indexed by thread_id.
+What you will learn
+- MessagesState holds the conversation messages.
+- call_model invokes the local LLM with the conversation history.
+- PostgresSaver stores graph checkpoints in PostgreSQL.
+- thread_id identifies which conversation should be resumed.
+- Reusing a thread ID continues its history, including after the Python process restarts, as long as the same database and checkpoint data remain available.
+- A different thread ID starts a separate conversation.
+1. Requirements
+Create a project virtual environment if you do not already have one, then activate it.
+macOS / zsh
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+Create requirements-postgres-local-llm.txt with:
+langgraph
+langgraph-checkpoint-postgres
+psycopg[binary,pool]
+langchain-core
+langchain-huggingface
+transformers
+torch
+python-dotenv
+Install the packages. Quote the psycopg requirement in zsh to prevent square brackets from being interpreted as a filename pattern:
+python -m pip install -r requirements-postgres-local-llm.txt
+Or install it directly with quotes:
+python -m pip install "psycopg[binary,pool]"
+2. Configure PostgreSQL
+Make sure PostgreSQL is running and that the target database exists. The example defaults to a local PostgreSQL database, but you should set the connection string for your own setup.
+
+Create a .env file in the directory from which you run the script:
+DATABASE_URL=postgresql://postgres:YOUR_PASSWORD@localhost:5432/postgres
+Replace YOUR_PASSWORD and the database name with your own values. Do not commit .env or real credentials to Git. Add .env to .gitignore.
+
+The URL format is:
+postgresql://USERNAME:PASSWORD@HOST:PORT/DATABASE
+3. Confirm the local model is cached
+The script uses:
+MODEL_ID = "Qwen/Qwen2.5-3B-Instruct"
+model_kwargs={"local_files_only": True}
+The model must already exist in your Hugging Face cache. local_files_only=True prevents Transformers from downloading it if it is missing. The first model load may take time and memory, depending on your Mac and installed PyTorch build.
+4. Run the script
+python 14_shortTermMemory_Postgres.py
+When prompted for a thread ID, use thread-1 and try:
+1. Hi, my name is Piyush.
+2. What is my name?
+Stop the program with exit. Run it again and enter the same thread-1 ID, then ask What is my name? again. The saved conversation history should be restored from PostgreSQL. Model quality can vary, so the answer is not guaranteed.
+
+To create a separate conversation, use another ID such as thread-2.
+5. How the checkpointer is connected
+with PostgresSaver.from_conn_string(DB_URI) as checkpointer:
+    checkpointer.setup()
+    graph = builder.compile(checkpointer=checkpointer)
+- PostgresSaver.from_conn_string(DB_URI) creates the PostgreSQL-backed checkpointer and manages its connection resources.
+- checkpointer.setup() creates the checkpoint tables if needed. Run it before using the graph; it is commonly performed during application setup.
+- builder.compile(checkpointer=checkpointer) attaches checkpoint persistence to the graph.
+- Every invocation must include a config containing the thread ID:
+config = {"configurable": {"thread_id": "thread-1"}}
+
+graph.invoke(
+    {"messages": [HumanMessage(content="What is my name?")]},
+    config=config,
+)
+6. Troubleshooting
+zsh: no matches found: psycopg[binary,pool]
+Quote the package specification:
+python -m pip install "psycopg[binary,pool]"
+Connection refused / cannot connect to PostgreSQL
+Check that PostgreSQL is running, the host and port are correct, and the database exists. Confirm the username and password in DATABASE_URL.
+Authentication failed
+Update the credentials in .env. Do not paste passwords into source code or commit them.
+Local model not found
+Confirm the model is cached under the expected Hugging Face model ID. Since the code uses local_files_only=True, it will fail instead of downloading a missing model.
+The conversation is not remembered
+Use the same PostgreSQL database and exact same thread_id. InMemorySaver is not used in this example; checkpoints are stored in PostgreSQL. If you change the database, delete checkpoint rows, or use another thread ID, you will not see the previous thread's history.
+Learning takeaway
+InMemorySaver is convenient for quick experiments, but its data disappears when the process exits. PostgresSaver stores checkpoint data in PostgreSQL, allowing a LangGraph conversation to resume across application restarts when the same database and thread ID are used.
 
 ## 🛠️ Tech Stack
 
