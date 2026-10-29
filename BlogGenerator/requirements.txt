@@ -1,0 +1,13 @@
+streamlit
+langgraph
+langgraph-checkpoint-sqlite
+langchain-core
+langchain-huggingface
+transformers
+torch
+accelerate
+python-dotenv
+
+langchain-openai
+langchain-tavily
+pydantic>=2
