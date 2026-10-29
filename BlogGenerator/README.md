@@ -1,104 +1,123 @@
-Local LLM Blog Generator (LangGraph)
-A learning project that generates Markdown blog posts with a locally cached Hugging Face language model and LangGraph. The graph creates an outline, generates sections in parallel, restores their original order, and writes the final Markdown file.
+Research-Aware Blog Generator (LangGraph)
+A technical blog generator built with LangGraph, OpenAI, and Tavily Search. It decides whether a topic needs web research, gathers and synthesizes evidence when needed, creates a structured outline, writes sections in parallel, restores their original order, and saves the result as a Markdown file.
 
-This project uses local inference rather than the OpenAI API. local_files_only=True prevents Transformers from downloading missing model files during startup.
+The Python script blog_generator.py is the current source of truth for this research-enabled workflow.
 Features
-- Local Hugging Face causal language model; defaults to Qwen/Qwen2.5-3B-Instruct.
-- Detailed Pydantic plan validation: audience, tone, section goals, 3–5 bullets per section, and word targets.
-- Enforces 5–7 sections, consecutive IDs, unique headings, and exactly one common_mistakes section.
-- JSON-prompt-based planning, compatible with base LLM integrations that do not implement with_structured_output().
-- LangGraph fan-out with Send for parallel section generation.
-- Reducer combines results in planned section order.
-- Writes the final blog to generated_blogs/.
+- Research router: classifies topics as closed_book, hybrid, or open_book.
+- Search on demand: uses Tavily only when the router decides current web evidence is useful or necessary.
+- Structured outputs: uses Pydantic schemas through ChatOpenAI.with_structured_output() for routing, evidence synthesis, and blog planning.
+- Evidence-aware writing: passes retrieved URLs and snippets to workers; open-book sections are instructed to cite supplied URLs and avoid unsupported claims.
+- Detailed planning: plans 5–9 sections, each with a goal, 3–6 bullets, a word target, tags, and flags for research, citations, and code.
+- Parallel section writing: LangGraph Send fans each planned section out to a worker.
+- Stable ordering: workers return section IDs; the reducer sorts sections before combining them.
+- Markdown output: saves the final article under generated_blogs/ by default.
+- Optional .env support: loads OPENAI_API_KEY, TAVILY_API_KEY, and OPENAI_MODEL from a project-level .env file.
 Architecture
 ```mermaid
 flowchart TD
-    A([START]) --> B[orchestrator: prompt for JSON outline]
-    B --> C[parse JSON and validate with Pydantic]
-    C --> D{fanout: one Send per section}
-    D --> W1[worker: write section 1]
-    D --> W2[worker: write section 2]
-    D --> WN[worker: write section N]
-    W1 --> R[reducer: sort and combine sections]
+    A([START]) --> B[Router: choose writing mode]
+    B -->|closed_book| C[Outline planner]
+    B -->|hybrid / open_book| D[Tavily web research]
+    D --> E[Evidence synthesis and URL deduplication]
+    E --> C
+    C --> F{Fan out with Send}
+    F --> W1[Worker: section 1]
+    F --> W2[Worker: section 2]
+    F --> WN[Worker: section N]
+    W1 --> R[Reducer: sort by section ID]
     W2 --> R
     WN --> R
-    R --> S[Save Markdown file]
-    S --> E([END])
+    R --> S[Save Markdown]
+    S --> Z([END])
 ```
-Parallel workers may finish in a different order. Each result is tagged with its section ID; the reducer sorts by that ID before writing the blog. The sections state field uses Annotated[List[str], operator.add] to merge worker outputs.
+Workflow stages
+1. Router — decides whether the topic is evergreen or depends on current information.
+2. Research — runs the router's focused queries through Tavily, normalizes results, asks the model to synthesize an evidence pack, and filters the pack so its URLs must come from the search results.
+3. Orchestrator — creates and validates a structured outline with 5–9 sections.
+4. Fan-out — uses LangGraph Send to dispatch one task payload per section.
+5. Workers — independently write Markdown sections using the outline, writing constraints, and available evidence.
+6. Reducer — sorts results by section ID, builds the complete Markdown article, and writes it to disk.
 Project structure
 BlogGenerator/
 ├── blog_generator.py
-├── blog_generator.ipynb          # step-by-step notebook version
+├── blog_generator.ipynb       # older local-model learning notebook
 ├── README.md
 ├── requirements.txt
-└── generated_blogs/          # created automatically
-Cached models
-Your local Hugging Face cache listing showed:
-- Qwen/Qwen2.5-3B-Instruct
-- sentence-transformers/all-MiniLM-L6-v2
-- TinyLlama/TinyLlama-1.1B-Chat-v1.0
-The Qwen model is the default. The embedding model is not needed by this workflow. TinyLlama can be selected using --model.
-Jupyter notebook
-Open blog_generator.ipynb in Jupyter or VS Code to follow the workflow in cells: schemas, local model setup, graph construction, and generation. The notebook uses the same local-cache assumptions as the script.
-Installation
-Use the Python version and virtual environment configured for your project. Install dependencies into the active environment:
-python -m pip install -U pip
-python -m pip install langgraph langchain-core langchain-huggingface transformers torch accelerate pydantic
-If your repository already has a shared requirements.txt, merge these dependencies into it instead of replacing existing entries.
-Run
-python blog_generator.py --topic "Self Attention"
-Select a cached model explicitly:
-python blog_generator.py --topic "How RAG works" --model "Qwen/Qwen2.5-3B-Instruct"
-Try TinyLlama:
-python blog_generator.py --topic "Introduction to LangGraph" --model "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-The output is written to a title-based Markdown filename under generated_blogs/.
-Code walkthrough
-1. Pydantic models
-- Task defines an ID, heading, reader goal, ordered bullets, target word count, and section type.
-- Plan defines the blog title, target audience, tone, and 5–7 tasks.
-- Pydantic validators enforce consecutive IDs, unique titles, valid word targets, and exactly one common_mistakes section.
-- parse_plan() extracts JSON from the model output and validates it using Plan.model_validate().
-2. Why the planner uses JSON prompting
-HuggingFacePipeline is a base LLM integration and may raise NotImplementedError for with_structured_output(). The orchestrator therefore asks the model to return JSON, then validates that JSON with Pydantic. This avoids relying on structured-output support in the model integration.
+├── .env                       # create locally; do not commit
+└── generated_blogs/           # created automatically
+Note: The existing notebook was created for the earlier local Hugging Face version. It does not yet mirror the research-enabled OpenAI/Tavily script. Run blog_generator.py for the workflow documented here.
 
-If the model returns malformed JSON, the program raises a readable error containing the model output. In a future enhancement, we can add a retry/repair step.
-3. Graph state and reducers
-BlogState carries the topic, plan, generated sections, final Markdown, and output path. The sections field uses operator.add to concatenate lists returned by parallel workers.
-4. Fan-out workers
-The fanout() function uses LangGraph's Send to dispatch one task per outline section. Each worker receives the overall topic, plan, and its own Task.
-5. Reducer
-The reducer sorts results by section ID, combines them, and writes the Markdown output. Sorting ensures parallel completion timing does not change the intended section order.
+Requirements
+- Python 3.12 recommended
+- An OpenAI API key
+- A Tavily API key when web research is selected
+- Internet access for OpenAI calls and Tavily search
+Setup on macOS
+From your project directory:
+cd ~/Development/AI_DEVELOPMENT/LangGraph/BlogGenerator
+
+# Activate your existing virtual environment
+source venv/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
+Create a .env file in the project root:
+OPENAI_API_KEY=your_openai_api_key
+TAVILY_API_KEY=your_tavily_api_key
+OPENAI_MODEL=gpt-4.1-mini
+Replace the example values with your own keys. Keep .env private and add it to .gitignore; never commit API keys.
+
+OPENAI_API_KEY is required for every run. TAVILY_API_KEY is required only when the router selects a research mode. For a topic that needs no research, the script should proceed in closed_book mode without Tavily.
+Run the generator
+python blog_generator.py --topic "Self Attention"
+Example with a current topic:
+python blog_generator.py --topic "State of Multimodal LLMs in 2026"
+Choose a different output directory:
+python blog_generator.py \
+  --topic "Building Reliable RAG Applications" \
+  --output-dir generated_blogs
+The script prints the generated Markdown and writes a file in generated_blogs/. The filename is derived from the generated blog title.
+Research modes
+Mode	When it is selected	Expected behavior
+closed_book	Evergreen topics, such as core concepts and fundamentals	Writes without a web-research step
+hybrid	Mostly evergreen topics that benefit from fresh examples or tool/model updates	Uses evidence for current claims and requests citations for affected sections
+open_book	Volatile topics such as latest releases, rankings, pricing, policy changes, or news roundups	Uses evidence-grounded reporting; the outline is planned as a news_roundup
+
+
+The router determines the mode before the outline is generated. The model can make routing mistakes, and search results may be incomplete, so review current claims and citations before publishing.
+Key LangGraph concepts used
+- StateGraph: defines the overall workflow and state shared between nodes.
+- Nodes: router, research, outline planner, section worker, and reducer functions.
+- Conditional edges: route to research or directly to planning based on the router result.
+- Send: creates one worker invocation per outline task, allowing parallel section generation.
+- Reducer: Annotated[List[tuple[int, str]], operator.add] appends worker results to the shared section list.
+- Structured output: Pydantic schemas constrain the router decision, evidence pack, and outline.
+- END: the workflow completes after the reducer saves the Markdown article.
 Troubleshooting
-Model not found locally
-ls -lah ~/.cache/huggingface/hub/
-The script intentionally uses local_files_only=True. If the model cache is incomplete, choose another cached model or download the model files separately before running.
-Invalid JSON from the model
-The planner requires a JSON object with blog_title, audience, tone, and tasks. Each task must include id, title, goal, bullets, target_words, and section_type. If the local model returns invalid JSON or violates the plan constraints, run it again. A retry-and-repair node can be added later.
-PyTorch or MPS problems
-python -c "import torch; print(torch.__version__); print(torch.backends.mps.is_available())"
-Device support depends on your installed PyTorch and Transformers versions. The script defaults to device_map="auto".
-Slow or incomplete generations
-Generation time depends on the model, available memory, device, prompt length, and max_new_tokens in build_llm().
-Current limitations
-- Syntax was checked while preparing the project, but model inference must be tested in your local virtual environment.
-- The model can still return malformed JSON or low-quality sections.
-- The generator does not browse the web or fact-check the content.
-- No retries, quality-review node, or automated tests are included yet.
-Future enhancements
-Keep this section updated as the project evolves:
-- Retry and repair malformed planning JSON.
-- Add a configurable number of sections and output token limits.
-- Add an editor/quality-review node.
-- Add RAG and grounded citations.
-- Add automated tests and logging.
-- Add a Streamlit interface or FastAPI endpoint.
-- Add configuration for temperature and output directory.
-Learning concepts
-- LangGraph StateGraph, START, and END
-- Parallel fan-out using Send
-- Shared graph state and reducers
-- Pydantic validation of model-generated JSON
-- Schema-driven technical writing prompts and section-level constraints
-- Local Hugging Face inference
-- Markdown file generation
+OPENAI_API_KEY is not set
+Confirm the .env file exists in the project root, has a valid OPENAI_API_KEY, and that python-dotenv is installed. Do not include quotes unless they are part of the key.
+TAVILY_API_KEY is required
+The router chose a research mode. Add a valid TAVILY_API_KEY to .env, or choose an evergreen topic if research is not needed.
+Tavily import error
+Install the current integration:
+pip install -U langchain-tavily
+The script uses from langchain_tavily import TavilySearch rather than the deprecated TavilySearchResults import from langchain-community.
+OpenAI structured-output or API errors
+Check that your API key is valid, your account can access the configured model, and package dependencies are installed in the active virtual environment. You can change the model through OPENAI_MODEL in .env.
+Too few sections in the generated plan
+The script expects 5–9 sections and stops with a clear error if the outline violates that requirement. Retry the run; if it happens repeatedly, tighten the planner prompt or add a controlled retry.
+Research claims are weak or unsupported
+Search results can be noisy and publication dates may be absent. Review the cited URLs directly, confirm dates before publishing, and remove claims that the evidence does not support. The code filters synthesized evidence to URLs returned by Tavily, but that does not guarantee every claim is accurate.
+Dependencies
+The primary dependencies are listed in requirements.txt:
+- langgraph
+- langchain-openai
+- langchain-tavily
+- pydantic
+- python-dotenv
+Suggested next improvements
+- Add retries for temporary API and structured-output failures.
+- Add automated checks for citation coverage and section word counts.
+- Store source metadata and generated articles as run artifacts.
+- Add LangSmith tracing for debugging and evaluation.
+- Create a matching notebook for the research-enabled workflow.
