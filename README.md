@@ -758,6 +758,435 @@ Important limitations
 Learning takeaway
 Summarization compresses earlier conversation context. Trimming removes older raw messages from the active state. Together, they control the size of the message history while preserving useful context for the local LLM.
 
+## 16.Long-Term Memory: Basic Semantic Search
+Script: 16_long_term_memory_semantic_search.py
+Store: LangGraph InMemoryStore
+Embeddings: Local sentence-transformers/all-MiniLM-L6-v2
+
+This example saves user facts in a namespace and retrieves relevant facts with semantic search. It is a basic long-term-memory pattern: information is saved under stable keys and can later be searched using a natural-language query.
+
+The implementation uses a local embedding model instead of OpenAIEmbeddings, so it does not require an OpenAI API key.
+How it works
+Memory text
+    |
+    v
+Local embedding model
+    |
+    v
+Vector index in InMemoryStore
+    |
+    v
+Natural-language search query
+    |
+    v
+Query embedding + similarity search
+    |
+    v
+Top matching memory items
+Setup
+Activate your LangGraph project's virtual environment, then install the required packages:
+python -m pip install \
+  langgraph \
+  langchain-core \
+  langchain-huggingface \
+  sentence-transformers \
+  transformers \
+  torch
+The script expects sentence-transformers/all-MiniLM-L6-v2 to already be downloaded into the Hugging Face cache. It uses local_files_only=True, so it will fail if the model is not cached locally.
+Run
+python 16_long_term_memory_semantic_search.py
+The script stores example memories, then runs three searches:
+- "What is the user currently learning?"
+- "What are the user's response preferences?"
+- "Which examples should I use when explaining code?"
+Key code
+1. Create a local embedding model
+embedding_model = HuggingFaceEmbeddings(
+    model_name="sentence-transformers/all-MiniLM-L6-v2",
+    model_kwargs={"local_files_only": True},
+    encode_kwargs={"normalize_embeddings": True},
+)
+An embedding model converts text into a numeric vector. Similar meanings tend to have vectors that are close in the embedding space.
+
+all-MiniLM-L6-v2 produces vectors with 384 dimensions, so the store index uses dims=384.
+2. Create a namespace and store memories
+store = InMemoryStore(
+    index={"embed": embedding_model, "dims": 384}
+)
+namespace = ("users", "u1")
+
+store.put(
+    namespace,
+    "1",
+    {"data": "User prefers concise answers over long explanations"},
+)
+- Namespace: groups memory records, here by user.
+- Key: unique identifier for a memory in that namespace.
+- Value: a dictionary containing the memory text.
+3. Search by meaning
+items = store.search(
+    namespace,
+    query="What are the user's response preferences?",
+    limit=3,
+)
+
+for item in items:
+    print(item.value)
+Semantic search can match related concepts even when the query does not repeat the exact words in a stored memory. The limit parameter controls how many matches are returned. Similarity scores are useful for ranking, but should not be treated as calibrated probabilities.
+Important distinction: long-term memory vs persistence
+This example demonstrates the API and semantic retrieval pattern, but InMemoryStore is not durable storage. All records disappear when the Python process ends. For real long-term memory across restarts and deployments, use a persistent store implementation and configure its embedding/indexing support.
+
+This example also does not automatically extract facts from a conversation. The code explicitly writes example facts with store.put; a production app needs a separate policy or workflow to decide what information to save, update, or delete.
+Learning takeaway
+- Checkpointing saves graph state for a conversation/thread.
+- Long-term store holds facts that can be retrieved across conversations, if the chosen backend persists them.
+- Embeddings represent text numerically.
+- Semantic search retrieves memories based on meaning rather than exact keyword matching.
+
+## 17 — Reading Existing Memory from a Store
+Script: 17_reading_existing_memory_from_store.py
+
+This example demonstrates how a LangGraph chatbot can read previously saved user memories from a LangGraph Store and use them to personalize its answer.
+Workflow
+Create InMemoryStore
+        |
+        v
+Save example memories for user u1
+        |
+        v
+Compile graph with store=store
+        |
+        v
+Invoke graph with configurable.user_id
+        |
+        v
+chat_node reads that user's namespace
+        |
+        v
+Memory records are added to the system prompt
+        |
+        v
+LLM answers the user's message
+Setup
+Activate your project's virtual environment and install the packages:
+python -m pip install langgraph langchain-core langchain-openai python-dotenv
+Add your API key to a .env file:
+OPENAI_API_KEY=your_api_key_here
+Do not commit .env to Git.
+Run
+python 17_reading_existing_memory_from_store.py
+The example saves a few sample memories, then asks the chatbot to explain generative AI in simple terms. The LLM receives both the current user message and the relevant saved-memory text.
+Important code concepts
+1. Save memory records
+user_details_namespace = ("user", "u1", "details")
+
+store.put(
+    user_details_namespace,
+    "preference_1",
+    {"data": "The user prefers step-by-step explanations."},
+)
+- Namespace: ("user", "u1", "details") groups details for user u1.
+- Key: preference_1 identifies one record in that namespace.
+- Value: a dictionary containing the memory text.
+2. Make the store available to the graph
+graph = builder.compile(store=store)
+Passing the store during compilation allows nodes to receive it as the store argument.
+3. Pass the user ID at invocation time
+config = {"configurable": {"user_id": "u1"}}
+result = graph.invoke({"messages": [...]}, config=config)
+The user_id selects the memory namespace. In an application, use the authenticated user's stable ID rather than trusting an arbitrary user ID supplied by a client.
+4. Read existing memories inside a node
+user_details = ("user", current_user_id, "details")
+items = store.search(user_details)
+Here, store.search(namespace) retrieves records in that namespace. This is a namespace lookup, not semantic similarity search. For semantic search, configure the store with an embedding index and pass a natural-language query=.
+5. Add memory text to the system prompt
+The node converts each record's data field to text, formats the system prompt, and invokes the model with the system message followed by the conversation messages.
+
+The node only reads existing memories. It does not create or update memories during the chat invocation.
+Key distinction: store vs checkpoint
+- Store: holds user information intended to be available across conversations.
+- Checkpoint: saves graph state for a particular thread or conversation.
+- InMemoryStore: is useful for learning, but its data disappears when the Python process ends. Use a persistent store backend for production long-term memory.
+Try it yourself
+1. Change the user_id in the invocation config to "u2" without seeding memories for that user. The prompt will say no saved memories were found.
+2. Add another store.put(...) record for "u1" and rerun the script.
+3. Compare the answer with and without relevant saved preferences.
+4. Next, build a separate memory-writing workflow that decides when a new fact should be saved or an existing fact updated.
+
+## 18Creating Long-Term Memory with Duplicate Prevention
+
+**Script:** `18_creating_long_term_memory.py`
+
+This example demonstrates a LangGraph node that uses an LLM to identify stable, useful facts in a user's latest message and save them to a long-term memory Store.
+
+Unlike the previous read-only example, this graph **creates and writes memories**. It also prevents duplicate memories using normalized text comparison and a thread lock around the read-and-write operation.
+
+The graph focuses on memory creation only. It does not retrieve saved memories to generate a personalized answer.
+
+## Workflow
+
+```text
+START
+  |
+  v
+remember_only_node
+  |
+  +--> Read the latest user message
+  |
+  +--> LLM extracts stable facts into MemoryDecision
+  |
+  +--> should_write?
+          |
+          +--> No: save nothing
+          |
+          +--> Yes:
+                 |
+                 v
+             Acquire store lock
+                 |
+                 v
+             Read existing memories
+                 |
+                 v
+             Normalize memory text
+             (case + whitespace)
+                 |
+                 v
+             Check for duplicates
+                 |
+                 +--> Duplicate: skip
+                 |
+                 +--> New memory: store.put(...)
+                 |
+                 v
+             Release store lock
+  |
+  v
+Return acknowledgement
+  |
+  v
+END
+```
+
+## Important concepts
+
+### 1. Structured output
+
+```python
+class MemoryDecision(BaseModel):
+    should_write: bool
+    memories: List[str] = Field(default_factory=list)
+
+memory_extractor = extractor_llm.with_structured_output(MemoryDecision)
+```
+
+Structured output asks the LLM to return a validated object rather than arbitrary prose.
+
+- `should_write`: indicates whether the model recommends saving memories.
+- `memories`: contains the extracted long-term memory statements.
+
+The LLM should extract stable, user-specific facts such as preferences, ongoing projects, and learning goals rather than temporary information.
+
+### 2. User-specific namespace
+
+```python
+user_id = config["configurable"]["user_id"]
+namespace = ("user", user_id, "details")
+```
+
+The namespace keeps each user's memory records separate.
+
+For example:
+
+```python
+("user", "u1", "details")
+("user", "u2", "details")
+```
+
+These namespaces represent different users, so their memory records remain logically isolated.
+
+In a real application, derive `user_id` from your authenticated identity system rather than trusting arbitrary user input.
+
+### 3. Store and unique memory keys
+
+```python
+from langgraph.store.memory import InMemoryStore
+from uuid import uuid4
+
+store = InMemoryStore()
+```
+
+Each memory is saved using:
+
+```python
+store.put(
+    namespace,
+    str(uuid4()),
+    {"data": memory},
+)
+```
+
+The three arguments represent:
+
+- **Namespace:** where the memory belongs.
+- **Key:** a unique identifier for the memory record.
+- **Value:** the stored memory text, under the `"data"` field.
+
+UUIDs prevent accidental key collisions, but **unique keys alone do not prevent duplicate memories**. Two identical facts can still be saved under different UUIDs.
+
+That is why the example adds duplicate detection.
+
+### 4. Preventing duplicate memories
+
+Before writing a memory, the node searches the existing records and normalizes their text.
+
+```python
+existing_items = store.search(namespace)
+
+existing_normalized = {
+    " ".join(
+        str(item.value.get("data", "")).casefold().split()
+    )
+    for item in existing_items
+}
+```
+
+Normalization makes duplicate comparison insensitive to capitalization and repeated whitespace.
+
+For example, these are considered duplicates:
+
+```text
+I prefer practical Python examples.
+i PREFER practical   Python examples.
+  I Prefer Practical Python Examples.
+```
+
+Before storing each candidate, the node checks the normalized text:
+
+```python
+normalized_memory = " ".join(memory.casefold().split())
+
+if normalized_memory in existing_normalized:
+    continue
+```
+
+If the memory already exists, the write is skipped.
+
+After saving a new memory, the node adds it to `existing_normalized`:
+
+```python
+store.put(
+    namespace,
+    str(uuid4()),
+    {"data": memory},
+)
+
+existing_normalized.add(normalized_memory)
+```
+
+This also prevents duplicate candidates within the same LLM response from being saved more than once.
+
+### 5. Locking the Store
+
+The example uses Python's `RLock`:
+
+```python
+from threading import RLock
+
+store_lock = RLock()
+```
+
+The duplicate-checking and writing operations are performed inside the same critical section:
+
+```python
+with store_lock:
+    existing_items = store.search(namespace)
+
+    # Normalize existing memories.
+    # Check candidate memories.
+    # Save only new memories.
+```
+
+**Why is locking important?**
+
+Without a lock, two concurrent calls could execute this sequence:
+
+1. Request A checks the Store and finds no matching memory.
+2. Request B checks the Store before A has written anything.
+3. Both requests conclude that the memory is new.
+4. Both save the same fact using different UUIDs.
+
+The lock makes the complete read-check-write sequence mutually exclusive for threads sharing the same lock.
+
+When execution leaves the `with` block, the lock is released automatically, including when an exception occurs.
+
+**Important limitation:** this is a process-local lock. It coordinates only code paths using the same lock instance in the same Python process. It does not coordinate separate processes, containers, or servers.
+
+For a multi-worker production application, use a persistent backend with an atomic uniqueness or upsert mechanism, or an appropriate distributed locking strategy.
+
+### 6. Exact-text deduplication versus semantic deduplication
+
+This example uses normalized exact-text comparison, not semantic similarity.
+
+| Existing memory | New candidate | Result |
+|---|---|---|
+| I prefer Python examples. | `I prefer Python examples.` | Skip |
+| I prefer Python examples. | ` I PREFER Python   examples. ` | Skip |
+| I prefer Python examples. | I like examples written in Python. | May save |
+| User is learning LangGraph. | User is studying LangGraph. | May save |
+
+Semantically similar statements can have different wording, so they may still be stored separately.
+
+Semantic deduplication would require an additional comparison strategy, such as embeddings and similarity thresholds, or an LLM-based memory reconciliation step.
+
+### 7. Why the graph returns a fixed acknowledgement
+
+This graph focuses on **memory creation only**.
+
+The `remember_only_node`:
+
+1. Reads the latest user message.
+2. Uses the LLM to extract candidate memories.
+3. Checks whether each candidate is already stored.
+4. Writes only new memories.
+5. Returns a fixed acknowledgement.
+
+It does not retrieve the saved memories to personalize an answer.
+
+A subsequent example can combine long-term memory retrieval, personalized chatbot responses, and memory creation into a single application.
+
+## Important limitations
+
+### In-memory storage
+
+`InMemoryStore` is temporary. Its data is lost when the Python process ends.
+
+It is suitable for learning and demonstrations. Use a persistent Store backend if memories must survive restarts.
+
+### Locking scope
+
+`RLock` protects the check-and-write sequence only when concurrent operations share the same lock instance. It does not provide cross-process or distributed locking.
+
+### Memory quality
+
+LLM extraction is not infallible. A model may save an inaccurate, redundant, or overly personal fact. Production applications should consider user consent, privacy controls, validation, memory updates, and deletion mechanisms.
+
+### Deduplication scope
+
+Normalization catches capitalization and whitespace differences but does not establish that two differently worded memories mean the same thing.
+
+## Try it yourself
+
+1. Send a message containing a durable preference, such as: `I prefer practical Python examples.`
+2. Send the same message again and verify that the second invocation does not create another record.
+3. Change the capitalization and whitespace, then verify that the normalized duplicate is skipped.
+4. Send a semantically similar sentence with different wording and observe the limitation of exact-text deduplication.
+5. Change `user_id` from `"u1"` to `"u2"` and verify that the memories belong to a different namespace.
+6. Run concurrent calls using the same graph, Store, and lock to understand how locking protects the check-and-write sequence.
+7. Replace `InMemoryStore` with a persistent backend and implement atomic deduplication for a multi-worker application.
+8. Extend the project to retrieve saved memories in a chatbot node and use them to generate personalized responses.
+
+
 ## 🛠️ Tech Stack
 
 -   **Python** --- Programming language

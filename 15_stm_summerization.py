@@ -1,6 +1,4 @@
 """
-15_stm_summarization.py
-
 LangGraph short-term memory example: summarization + message trimming.
 Uses local Qwen/Qwen2.5-3B-Instruct from the Hugging Face cache.
 """
