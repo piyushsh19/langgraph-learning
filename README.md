@@ -681,6 +681,83 @@ Use the same PostgreSQL database and exact same thread_id. InMemorySaver is not 
 Learning takeaway
 InMemorySaver is convenient for quick experiments, but its data disappears when the process exits. PostgresSaver stores checkpoint data in PostgreSQL, allowing a LangGraph conversation to resume across application restarts when the same database and thread ID are used.
 
+### 15 — Short-Term Memory: Summarization and Trimming
+Script: 15_stm_summarization.py
+Local model: Qwen/Qwen2.5-3B-Instruct
+Framework: LangGraph + LangChain Hugging Face integration
+Checkpointing: InMemorySaver
+
+This example manages short-term memory by summarizing older conversation messages and retaining the latest two messages verbatim. The local Hugging Face model is loaded from cache with local_files_only=True; the example does not use ChatOpenAI or an OpenAI API key.
+Workflow
+                 START
+                   |
+                   v
+                [chat]
+                   |
+                   v
+       More than 6 messages stored?
+             /             \
+           Yes              No
+            |                |
+            v                v
+     [summarize]            END
+            |
+            v
+           END
+Key concepts
+1. State schema
+class ChatState(MessagesState):
+    summary: str
+MessagesState provides the messages field and its message-aware reducer. The additional summary field stores a compact summary of earlier conversation context.
+2. Summary-aware chat node
+If a summary exists, chat_node prepends it as a SystemMessage, then passes the retained messages to the local model. This lets the model use earlier context even after the original messages are removed.
+3. Conditional summarization
+The graph checks the number of stored messages after the chat node runs. If there are more than six, it routes to the summarization node. The threshold is intentionally small for learning and can be changed.
+4. Update the running summary
+The summarization node sends the current messages plus an instruction to the model. If a previous summary exists, the prompt asks the model to update it with new information while avoiding unnecessary repetition. The prompt is added only to a temporary list and is not saved as a chat message.
+5. Trim older messages
+messages_to_delete = state["messages"][:-2]
+deletion_updates = [
+    RemoveMessage(id=message.id)
+    for message in messages_to_delete
+    if message.id is not None
+]
+The last two messages are retained verbatim. Older messages are removed using RemoveMessage, which works with the reducer in MessagesState. Their important information should remain represented in the summary.
+6. Thread-based checkpointing
+graph = builder.compile(checkpointer=InMemorySaver())
+config = {"configurable": {"thread_id": "stm-demo"}}
+The same thread ID identifies the same conversation while the process is running. InMemorySaver is not persistent: its checkpoints disappear when the Python process exits. Use a persistent checkpointer, such as PostgreSQL, if state must survive restarts.
+Setup on macOS
+Activate your project virtual environment, then install dependencies:
+python -m pip install --upgrade pip
+python -m pip install \
+  langgraph \
+  langchain-core \
+  langchain-huggingface \
+  transformers \
+  torch \
+  python-dotenv
+If these packages are already installed in your LangGraph environment, you do not need to reinstall them.
+Local model prerequisite
+The script uses:
+MODEL_ID = "Qwen/Qwen2.5-3B-Instruct"
+model_kwargs={"local_files_only": True}
+The model must already be in your Hugging Face cache. With local_files_only=True, loading fails rather than downloading a missing model.
+Run it
+python 15_stm_summarization.py
+Try a conversation with several messages about the same topic. When the stored message count exceeds six, the graph should summarize the conversation and reduce the stored history to the most recent two messages. The program prints the current summary and message list after each turn.
+- Type state to inspect the current memory.
+- Type exit to quit.
+- Use the same thread ID during one run to continue that conversation.
+Important limitations
+- Summarization happens after the chat node runs and the message count exceeds six.
+- The most recent two messages remain verbatim; older messages are represented by the summary.
+- Model-generated summaries may omit or distort details, so verify important facts.
+- InMemorySaver does not survive application restarts.
+- This is a short-term memory pattern, not a permanent user-profile store.
+Learning takeaway
+Summarization compresses earlier conversation context. Trimming removes older raw messages from the active state. Together, they control the size of the message history while preserving useful context for the local LLM.
+
 ## 🛠️ Tech Stack
 
 -   **Python** --- Programming language
